@@ -1,0 +1,17 @@
+[project]
+name = "atsbackend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.104.0",
+    "sqlalchemy>=2.0.44",
+    "asyncpg>=0.29.0",
+    "greenlet>=3.0.0",
+    "python-dotenv>=1.0.0",
+    "python-jose[cryptography]>=3.3.0",
+    "httpx>=0.25.0",
+    "pydantic[email]>=2.0.0",
+    "uvicorn[standard]>=0.24.0",
+]
