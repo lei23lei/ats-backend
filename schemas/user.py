@@ -22,7 +22,7 @@ class UserResponse(UserBase):
     email_verified: bool
     is_active: bool
     created_at: datetime
-    updated_at: datetime
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
