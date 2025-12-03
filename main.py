@@ -6,14 +6,10 @@ import uvicorn
 import os
 from dotenv import load_dotenv
 from database import get_db, engine, Base
-# Import models to register them with SQLAlchemy
-from models import (
-    User, OAuthAccount, EmailVerification, PasswordReset, Subscription,
-    News, Post, Comment, Reaction,
-    OAuthProvider, ContentType
-)
+
 # Import routers
-from routers import user as user_router
+from routers import user_oauth as user_oauth_router
+from routers import user_email as user_email_router
 
 # Load environment variables from .env file
 load_dotenv()
@@ -73,7 +69,8 @@ async def db_test(db: AsyncSession = Depends(get_db)):
 
 
 # Include routers
-app.include_router(user_router.router)
+app.include_router(user_oauth_router.router)
+app.include_router(user_email_router.router)
 
 
 if __name__ == "__main__":
