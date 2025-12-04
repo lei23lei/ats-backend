@@ -1,10 +1,11 @@
 """Email-based user registration and authentication routes"""
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+import uuid
+from datetime import datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, text
@@ -12,12 +13,10 @@ from sqlalchemy.orm import selectinload
 from jose import JWTError, jwt
 import bcrypt
 from database import get_db
-from models import User, EmailVerification, PasswordReset
-from schemas.user import (
-    UserRegister, UserResponse, UserLogin, ResendVerificationRequest,
-    ForgotPasswordRequest, ResetPasswordRequest
-)
-from services.email import send_verification_email, send_password_reset_email
+from models import User, EmailVerification
+from schemas.user import UserRegister, UserResponse, UserLogin, ResendVerificationRequest
+from services.email import send_verification_email
+from services.cloudinary import upload_image, delete_image
 
 # Load environment variables
 load_dotenv()
@@ -29,7 +28,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
-EMAIL_VERIFICATION_EXPIRATION_HOURS = 1
+EMAIL_VERIFICATION_EXPIRATION_HOURS = 24
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -60,12 +59,26 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         )
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+        expire = datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return encoded_jwt
+
+
+def verify_token(token: str) -> dict:
+    """Verify and decode JWT token"""
+    if not JWT_SECRET_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="JWT_SECRET_KEY not configured"
+        )
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
 
 @router.post("/register", response_model=UserResponse, status_code=201)
@@ -75,6 +88,7 @@ async def register(
 ):
     """Register a new user with email and password"""
     # Clean up unverified accounts older than 5 minutes (for testing - change to 24 hours in production)
+    # Use database time for consistency - ensures timezone and clock synchronization
     # Use direct SQL DELETE to avoid loading relationships that may not exist in the database
     await db.execute(
         text("""
@@ -98,7 +112,7 @@ async def register(
             detail="Email already registered"
         )
     
-    # Check if username already exists
+    # Check if username already exists (only for new registrations)
     # Username is reserved even if email is not verified
     existing_username = await db.execute(
         select(User).where(User.username == user_data.username)
@@ -125,7 +139,7 @@ async def register(
     
     # Generate verification token
     verification_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
+    expires_at = datetime.utcnow() + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
     
     # Create email verification record
     email_verification = EmailVerification(
@@ -184,8 +198,8 @@ async def verify_email(
         print(f"Token already verified: {token[:20]}...")
         raise HTTPException(status_code=400, detail="Email already verified")
     
-    # Check if expired (use timezone-aware datetime for comparison)
-    if datetime.now(timezone.utc) > email_verification.expires_at:
+    # Check if expired
+    if datetime.utcnow() > email_verification.expires_at:
         print(f"Token expired: {token[:20]}... (expired at {email_verification.expires_at})")
         raise HTTPException(status_code=400, detail="Verification token has expired")
     
@@ -198,14 +212,11 @@ async def verify_email(
     
     # Mark email as verified
     user.email_verified = True
-    email_verification.verified_at = datetime.now(timezone.utc)
+    email_verification.verified_at = datetime.utcnow()
     
     await db.commit()
     print(f"Email verified successfully for user: {user.email}")
     
-    # Refresh user to ensure all attributes are loaded (especially updated_at)
-    await db.refresh(user)
-
     # Create JWT token to automatically log the user in
     token_data = {
         "sub": str(user.id),
@@ -219,17 +230,22 @@ async def verify_email(
     is_secure = ENVIRONMENT == "production"
     
     # Create JSON response with user data and set JWT token in HttpOnly cookie
-    # Use model_dump with mode='json' to ensure datetime serialization
-    user_response = UserResponse.model_validate(user)
+    # Frontend will handle the redirect
     response_content = {
         "message": "Email verified successfully",
-        "user": user_response.model_dump(mode='json'),
+        "user": UserResponse.model_validate(user).model_dump(),
         "auto_login": True  # Signal to frontend to redirect to home
     }
     
     response = JSONResponse(content=response_content, status_code=200)
     
     # Set HttpOnly cookie with JWT token
+    # Extract domain from FRONTEND_URL (e.g., "localhost" from "http://localhost:3000")
+    # This allows the cookie to be accessible across ports on the same domain
+    from urllib.parse import urlparse
+    parsed_url = urlparse(FRONTEND_URL)
+    cookie_domain = parsed_url.hostname
+    
     response.set_cookie(
         key="access_token",
         value=jwt_token,
@@ -237,7 +253,8 @@ async def verify_email(
         httponly=True,
         secure=is_secure,
         samesite="lax",
-        max_age=JWT_EXPIRATION_HOURS * 3600
+        max_age=JWT_EXPIRATION_HOURS * 3600,
+        domain=cookie_domain if cookie_domain and cookie_domain != "localhost" else None
     )
     
     return response
@@ -274,7 +291,7 @@ async def resend_verification(
     
     # Generate new verification token
     verification_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
+    expires_at = datetime.utcnow() + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
     
     # Create new email verification record
     email_verification = EmailVerification(
@@ -325,9 +342,8 @@ async def login(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User account is inactive")
     
-    # SECURITY: Block login if email is not verified
+    # If email is not verified, send verification email automatically
     if not user.email_verified:
-        # Send verification email to help user verify their account
         # Invalidate old verification tokens
         old_verifications_result = await db.execute(
             select(EmailVerification).where(
@@ -342,7 +358,7 @@ async def login(
         
         # Generate new verification token
         verification_token = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
+        expires_at = datetime.utcnow() + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
         
         # Create new email verification record
         email_verification = EmailVerification(
@@ -361,16 +377,10 @@ async def login(
                 verification_token=verification_token,
                 frontend_url=FRONTEND_URL
             )
-            print(f"Verification email sent to {user.email} - login rejected due to unverified email")
+            print(f"Verification email sent to {user.email} during login")
         except Exception as e:
-            print(f"Failed to send verification email: {e}")
-            # Still reject login even if email sending fails
-        
-        # Reject login with helpful error message
-        raise HTTPException(
-            status_code=403,
-            detail="Email not verified. Please check your email and verify your account before logging in. A new verification email has been sent."
-        )
+            print(f"Failed to send verification email during login: {e}")
+            # Don't fail login, just log the error
     
     # Create JWT token
     token_data = {
@@ -385,12 +395,14 @@ async def login(
     is_secure = ENVIRONMENT == "production"
     
     # Create response with token in HttpOnly cookie
-    # Use model_dump with mode='json' to ensure datetime serialization
-    user_response = UserResponse.model_validate(user)
     response_content = {
         "message": "Login successful",
-        "user": user_response.model_dump(mode='json')
+        "user": UserResponse.model_validate(user).model_dump()
     }
+    
+    # Add warning if email is not verified
+    if not user.email_verified:
+        response_content["warning"] = "Email not verified. A verification email has been sent to your email address."
     
     response = JSONResponse(content=response_content)
     
@@ -407,118 +419,93 @@ async def login(
     return response
 
 
-@router.post("/forgot-password")
-async def forgot_password(
-    request: ForgotPasswordRequest,
+@router.post("/upload-icon", response_model=UserResponse)
+async def upload_user_icon(
+    request: Request,
+    file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db)
 ):
-    """Request password reset - sends reset link to email"""
-    # Find user by email
-    result = await db.execute(select(User).where(User.email == request.email))
+    """Upload user profile icon/avatar"""
+    # Get token from HttpOnly cookie (preferred) or Authorization header (fallback)
+    token = None
+    
+    # Try to get from cookie first
+    token = request.cookies.get("access_token")
+    
+    # Fallback to Authorization header if no cookie
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        payload = verify_token(token)
+        user_id = int(payload.get("sub"))
+    except (ValueError, KeyError):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # Get user from database
+    result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     
     if not user:
-        # Don't reveal if email exists or not (security)
-        return {"message": "If the email exists, a password reset email has been sent"}
-    
-    # Only allow password reset for email-based users (not OAuth-only users)
-    if not user.password_hash:
-        # Don't reveal if user exists or not
-        return {"message": "If the email exists, a password reset email has been sent"}
-    
-    # Invalidate old unused reset tokens
-    old_resets_result = await db.execute(
-        select(PasswordReset).where(
-            PasswordReset.user_id == user.id,
-            PasswordReset.used_at.is_(None)
-        )
-    )
-    old_resets = old_resets_result.scalars().all()
-    for old_reset in old_resets:
-        await db.delete(old_reset)
-    await db.flush()
-    
-    # Generate new reset token
-    reset_token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)  # 1 hour expiration
-    
-    # Create password reset record
-    password_reset = PasswordReset(
-        user_id=user.id,
-        token=reset_token,
-        expires_at=expires_at
-    )
-    db.add(password_reset)
-    await db.commit()
-    
-    # Send password reset email
-    try:
-        await send_password_reset_email(
-            email=user.email,
-            username=user.username,
-            reset_token=reset_token,
-            frontend_url=FRONTEND_URL
-        )
-        print(f"Password reset email sent to {user.email}")
-    except Exception as e:
-        print(f"Failed to send password reset email: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Failed to send password reset email")
-    
-    return {"message": "If the email exists, a password reset email has been sent"}
-
-
-@router.post("/reset-password")
-async def reset_password(
-    request: ResetPasswordRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    """Reset password with token"""
-    if not request.token:
-        raise HTTPException(status_code=400, detail="Reset token is required")
-    
-    # Find reset record with user relationship loaded
-    result = await db.execute(
-        select(PasswordReset)
-        .options(selectinload(PasswordReset.user))
-        .where(PasswordReset.token == request.token)
-    )
-    password_reset = result.scalar_one_or_none()
-    
-    if not password_reset:
-        print(f"Password reset token not found: {request.token[:20]}...")
-        raise HTTPException(status_code=400, detail="Invalid reset token")
-    
-    # Check if already used
-    if password_reset.used_at:
-        print(f"Token already used: {request.token[:20]}...")
-        raise HTTPException(status_code=400, detail="Reset token has already been used")
-    
-    # Check if expired
-    if datetime.now(timezone.utc) > password_reset.expires_at:
-        print(f"Token expired: {request.token[:20]}... (expired at {password_reset.expires_at})")
-        raise HTTPException(status_code=400, detail="Reset token has expired")
-    
-    # Get user (should be loaded via selectinload)
-    user = password_reset.user
-    
-    if not user:
-        print(f"User not found for token: {request.token[:20]}...")
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Check if user has a password (not OAuth-only)
-    if not user.password_hash:
-        raise HTTPException(status_code=400, detail="This account uses OAuth login and cannot reset password")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User is inactive")
     
-    # Hash new password
-    new_password_hash = get_password_hash(request.new_password)
+    # Validate file type
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
     
-    # Update password
-    user.password_hash = new_password_hash
-    password_reset.used_at = datetime.now(timezone.utc)
+    # Validate file size (max 5MB)
+    file_content = await file.read()
+    if len(file_content) > 5 * 1024 * 1024:  # 5MB
+        raise HTTPException(status_code=400, detail="File size must be less than 5MB")
     
-    await db.commit()
-    print(f"Password reset successfully for user: {user.email}")
+    # Delete old avatar from Cloudinary if it exists
+    if user.avatar_url and "cloudinary.com" in user.avatar_url:
+        try:
+            # Extract public_id from Cloudinary URL
+            # Cloudinary URLs format: https://res.cloudinary.com/{cloud_name}/image/upload/{transformations}/{public_id}.{format}
+            # We need to extract the public_id which is: avatars/user_{user.id}
+            # The public_id we use is relative to folder, so it's just "user_{user.id}"
+            old_public_id = f"avatars/user_{user.id}"
+            await delete_image(old_public_id)
+        except Exception as e:
+            # Log error but don't fail the upload if deletion fails
+            print(f"Failed to delete old avatar from Cloudinary: {e}")
     
-    return {"message": "Password reset successfully"}
+    try:
+        # Upload to Cloudinary with user-specific public_id
+        # public_id is relative to the folder, so just use user_{user.id}
+        public_id = f"user_{user.id}"
+        cloudinary_result = await upload_image(
+            file_content=file_content,
+            folder="avatars",
+            public_id=public_id
+        )
+        
+        # Get secure URL from Cloudinary response
+        secure_url = cloudinary_result.get("secure_url")
+        
+        if not secure_url:
+            raise HTTPException(status_code=500, detail="Failed to get image URL from Cloudinary")
+        
+        # Update user's avatar_url in database
+        user.avatar_url = secure_url
+        await db.commit()
+        await db.refresh(user)
+        
+        return user
+        
+    except ValueError as e:
+        # Cloudinary configuration error
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        # Other upload errors
+        raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
+
