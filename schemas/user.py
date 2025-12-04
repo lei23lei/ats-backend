@@ -95,3 +95,35 @@ class GoogleUserInfo(BaseModel):
     given_name: Optional[str] = None
     family_name: Optional[str] = None
 
+
+class ForgotPasswordRequest(BaseModel):
+    """Schema for forgot password request"""
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """Schema for reset password request"""
+    token: str
+    new_password: str
+    
+    @field_validator('new_password')
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        """Validate password: 8-16 chars, must have number, letter, lowercase, and uppercase"""
+        if len(v) < 8 or len(v) > 16:
+            raise ValueError('Password must be between 8 and 16 characters')
+        
+        if not re.search(r'[0-9]', v):
+            raise ValueError('Password must contain at least one number')
+        
+        if not re.search(r'[a-z]', v):
+            raise ValueError('Password must contain at least one lowercase letter')
+        
+        if not re.search(r'[A-Z]', v):
+            raise ValueError('Password must contain at least one uppercase letter')
+        
+        if not re.search(r'[a-zA-Z]', v):
+            raise ValueError('Password must contain at least one letter')
+        
+        return v
+

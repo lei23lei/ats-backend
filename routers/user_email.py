@@ -12,9 +12,12 @@ from sqlalchemy.orm import selectinload
 from jose import JWTError, jwt
 import bcrypt
 from database import get_db
-from models import User, EmailVerification
-from schemas.user import UserRegister, UserResponse, UserLogin, ResendVerificationRequest
-from services.email import send_verification_email
+from models import User, EmailVerification, PasswordReset
+from schemas.user import (
+    UserRegister, UserResponse, UserLogin, ResendVerificationRequest,
+    ForgotPasswordRequest, ResetPasswordRequest
+)
+from services.email import send_verification_email, send_password_reset_email
 
 # Load environment variables
 load_dotenv()
@@ -202,7 +205,7 @@ async def verify_email(
     
     # Refresh user to ensure all attributes are loaded (especially updated_at)
     await db.refresh(user)
-    
+
     # Create JWT token to automatically log the user in
     token_data = {
         "sub": str(user.id),
@@ -403,3 +406,119 @@ async def login(
     
     return response
 
+
+@router.post("/forgot-password")
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Request password reset - sends reset link to email"""
+    # Find user by email
+    result = await db.execute(select(User).where(User.email == request.email))
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        # Don't reveal if email exists or not (security)
+        return {"message": "If the email exists, a password reset email has been sent"}
+    
+    # Only allow password reset for email-based users (not OAuth-only users)
+    if not user.password_hash:
+        # Don't reveal if user exists or not
+        return {"message": "If the email exists, a password reset email has been sent"}
+    
+    # Invalidate old unused reset tokens
+    old_resets_result = await db.execute(
+        select(PasswordReset).where(
+            PasswordReset.user_id == user.id,
+            PasswordReset.used_at.is_(None)
+        )
+    )
+    old_resets = old_resets_result.scalars().all()
+    for old_reset in old_resets:
+        await db.delete(old_reset)
+    await db.flush()
+    
+    # Generate new reset token
+    reset_token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)  # 1 hour expiration
+    
+    # Create password reset record
+    password_reset = PasswordReset(
+        user_id=user.id,
+        token=reset_token,
+        expires_at=expires_at
+    )
+    db.add(password_reset)
+    await db.commit()
+    
+    # Send password reset email
+    try:
+        await send_password_reset_email(
+            email=user.email,
+            username=user.username,
+            reset_token=reset_token,
+            frontend_url=FRONTEND_URL
+        )
+        print(f"Password reset email sent to {user.email}")
+    except Exception as e:
+        print(f"Failed to send password reset email: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Failed to send password reset email")
+    
+    return {"message": "If the email exists, a password reset email has been sent"}
+
+
+@router.post("/reset-password")
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Reset password with token"""
+    if not request.token:
+        raise HTTPException(status_code=400, detail="Reset token is required")
+    
+    # Find reset record with user relationship loaded
+    result = await db.execute(
+        select(PasswordReset)
+        .options(selectinload(PasswordReset.user))
+        .where(PasswordReset.token == request.token)
+    )
+    password_reset = result.scalar_one_or_none()
+    
+    if not password_reset:
+        print(f"Password reset token not found: {request.token[:20]}...")
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+    
+    # Check if already used
+    if password_reset.used_at:
+        print(f"Token already used: {request.token[:20]}...")
+        raise HTTPException(status_code=400, detail="Reset token has already been used")
+    
+    # Check if expired
+    if datetime.now(timezone.utc) > password_reset.expires_at:
+        print(f"Token expired: {request.token[:20]}... (expired at {password_reset.expires_at})")
+        raise HTTPException(status_code=400, detail="Reset token has expired")
+    
+    # Get user (should be loaded via selectinload)
+    user = password_reset.user
+    
+    if not user:
+        print(f"User not found for token: {request.token[:20]}...")
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check if user has a password (not OAuth-only)
+    if not user.password_hash:
+        raise HTTPException(status_code=400, detail="This account uses OAuth login and cannot reset password")
+    
+    # Hash new password
+    new_password_hash = get_password_hash(request.new_password)
+    
+    # Update password
+    user.password_hash = new_password_hash
+    password_reset.used_at = datetime.now(timezone.utc)
+    
+    await db.commit()
+    print(f"Password reset successfully for user: {user.email}")
+    
+    return {"message": "Password reset successfully"}

@@ -85,7 +85,7 @@ async def send_verification_email(email: str, username: str, verification_token:
 
 async def send_password_reset_email(email: str, username: str, reset_token: str, frontend_url: str):
     """Send password reset email"""
-    reset_url = f"{frontend_url}/auth/reset-password?token={reset_token}"
+    reset_url = f"{frontend_url}/reset-pwd?token={reset_token}"
     
     html_content = f"""
     <html>
