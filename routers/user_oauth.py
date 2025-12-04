@@ -3,7 +3,7 @@ import os
 import secrets
 import uuid
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Response, Request
@@ -58,9 +58,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         )
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
+        expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return encoded_jwt
@@ -82,7 +82,7 @@ def verify_token(token: str) -> dict:
 
 def cleanup_expired_states():
     """Remove expired OAuth states to prevent memory leak"""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expired_states = [
         state for state, data in oauth_states.items()
         if (now - data["created_at"]).total_seconds() > STATE_EXPIRATION_MINUTES * 60
@@ -111,7 +111,7 @@ async def google_login():
     # Generate secure state parameter for CSRF protection
     state = secrets.token_urlsafe(32)
     oauth_states[state] = {
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
         "used": False
     }
     
@@ -176,7 +176,7 @@ async def google_callback(
     
     # Check if state has expired
     state_data = oauth_states[state]
-    if (datetime.utcnow() - state_data["created_at"]).total_seconds() > STATE_EXPIRATION_MINUTES * 60:
+    if (datetime.now(timezone.utc) - state_data["created_at"]).total_seconds() > STATE_EXPIRATION_MINUTES * 60:
         oauth_states.pop(state, None)  # Remove expired state
         raise HTTPException(status_code=400, detail="Invalid or expired state")
     

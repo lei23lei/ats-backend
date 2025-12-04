@@ -1,7 +1,6 @@
 """Email-based user registration and authentication routes"""
 import os
 import secrets
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dotenv import load_dotenv
@@ -27,7 +26,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
-EMAIL_VERIFICATION_EXPIRATION_HOURS = 24
+EMAIL_VERIFICATION_EXPIRATION_HOURS = 1
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -73,7 +72,6 @@ async def register(
 ):
     """Register a new user with email and password"""
     # Clean up unverified accounts older than 5 minutes (for testing - change to 24 hours in production)
-    # Use database time for consistency - ensures timezone and clock synchronization
     # Use direct SQL DELETE to avoid loading relationships that may not exist in the database
     await db.execute(
         text("""
@@ -97,7 +95,7 @@ async def register(
             detail="Email already registered"
         )
     
-    # Check if username already exists (only for new registrations)
+    # Check if username already exists
     # Username is reserved even if email is not verified
     existing_username = await db.execute(
         select(User).where(User.username == user_data.username)
@@ -218,7 +216,6 @@ async def verify_email(
     is_secure = ENVIRONMENT == "production"
     
     # Create JSON response with user data and set JWT token in HttpOnly cookie
-    # Frontend will handle the redirect
     # Use model_dump with mode='json' to ensure datetime serialization
     user_response = UserResponse.model_validate(user)
     response_content = {
@@ -230,12 +227,6 @@ async def verify_email(
     response = JSONResponse(content=response_content, status_code=200)
     
     # Set HttpOnly cookie with JWT token
-    # Extract domain from FRONTEND_URL (e.g., "localhost" from "http://localhost:3000")
-    # This allows the cookie to be accessible across ports on the same domain
-    from urllib.parse import urlparse
-    parsed_url = urlparse(FRONTEND_URL)
-    cookie_domain = parsed_url.hostname
-    
     response.set_cookie(
         key="access_token",
         value=jwt_token,
@@ -243,8 +234,7 @@ async def verify_email(
         httponly=True,
         secure=is_secure,
         samesite="lax",
-        max_age=JWT_EXPIRATION_HOURS * 3600,
-        domain=cookie_domain if cookie_domain and cookie_domain != "localhost" else None
+        max_age=JWT_EXPIRATION_HOURS * 3600
     )
     
     return response
@@ -332,8 +322,9 @@ async def login(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User account is inactive")
     
-    # If email is not verified, send verification email automatically
+    # SECURITY: Block login if email is not verified
     if not user.email_verified:
+        # Send verification email to help user verify their account
         # Invalidate old verification tokens
         old_verifications_result = await db.execute(
             select(EmailVerification).where(
@@ -367,10 +358,16 @@ async def login(
                 verification_token=verification_token,
                 frontend_url=FRONTEND_URL
             )
-            print(f"Verification email sent to {user.email} during login")
+            print(f"Verification email sent to {user.email} - login rejected due to unverified email")
         except Exception as e:
-            print(f"Failed to send verification email during login: {e}")
-            # Don't fail login, just log the error
+            print(f"Failed to send verification email: {e}")
+            # Still reject login even if email sending fails
+        
+        # Reject login with helpful error message
+        raise HTTPException(
+            status_code=403,
+            detail="Email not verified. Please check your email and verify your account before logging in. A new verification email has been sent."
+        )
     
     # Create JWT token
     token_data = {
@@ -391,10 +388,6 @@ async def login(
         "message": "Login successful",
         "user": user_response.model_dump(mode='json')
     }
-    
-    # Add warning if email is not verified
-    if not user.email_verified:
-        response_content["warning"] = "Email not verified. A verification email has been sent to your email address."
     
     response = JSONResponse(content=response_content)
     

@@ -66,7 +66,7 @@ async def send_verification_email(email: str, username: str, verification_token:
         <p><a href="{verification_url}">Verify Email Address</a></p>
         <p>Or copy and paste this link into your browser:</p>
         <p>{verification_url}</p>
-        <p>This link will expire in 24 hours.</p>
+        <p>This link will expire in 1 hour.</p>
         <p>If you didn't create an account, please ignore this email.</p>
     </body>
     </html>
