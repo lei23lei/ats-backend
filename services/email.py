@@ -18,7 +18,7 @@ def get_email_config() -> ConnectionConfig:
         MAIL_USERNAME = os.getenv("MAIL_USERNAME")
         MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")
         MAIL_FROM = os.getenv("MAIL_FROM")
-        MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
+        MAIL_PORT = int(os.getenv("MAIL_PORT", "465"))  # Default to 465 (SSL) instead of 587 (STARTTLS)
         MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.gmail.com")
         MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "ATS Backend")
         
@@ -31,6 +31,11 @@ def get_email_config() -> ConnectionConfig:
         ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
         validate_certs = ENVIRONMENT == "production"
         
+        # Use SSL/TLS (port 465) instead of STARTTLS (port 587) for better cloud compatibility
+        # Port 465 uses SSL from the start, which is more reliable on cloud platforms like Render
+        use_ssl = MAIL_PORT == 465
+        use_starttls = MAIL_PORT == 587
+        
         _conf = ConnectionConfig(
             MAIL_USERNAME=MAIL_USERNAME,
             MAIL_PASSWORD=MAIL_PASSWORD,
@@ -38,8 +43,8 @@ def get_email_config() -> ConnectionConfig:
             MAIL_PORT=MAIL_PORT,
             MAIL_SERVER=MAIL_SERVER,
             MAIL_FROM_NAME=MAIL_FROM_NAME,
-            MAIL_STARTTLS=True,
-            MAIL_SSL_TLS=False,
+            MAIL_STARTTLS=use_starttls,
+            MAIL_SSL_TLS=use_ssl,
             USE_CREDENTIALS=True,
             VALIDATE_CERTS=validate_certs
         )
