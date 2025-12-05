@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from jose import JWTError, jwt
 from database import get_db
-from models import User, OAuthAccount, OAuthProvider
+from models import User, OAuthAccount, OAuthProvider, EmailVerification
 from schemas.user import UserResponse, TokenResponse, GoogleUserInfo
 
 # Load environment variables
@@ -257,8 +257,26 @@ async def google_callback(
         # Update user info if changed
         if google_user_info.picture and google_user_info.picture != user.avatar_url:
             user.avatar_url = google_user_info.picture
+        
+        # If Google email is verified, verify the user's email and clean up old tokens
         if google_user_info.verified_email:
-            user.email_verified = True
+            # Mark email as verified (Google OAuth confirms email ownership)
+            if not user.email_verified:
+                user.email_verified = True
+                print(f"Email verified via Google OAuth for user: {user.email}")
+            
+            # Clean up old unverified email verification tokens
+            # These are no longer needed since email is verified via OAuth
+            old_verifications_result = await db.execute(
+                select(EmailVerification).where(
+                    EmailVerification.user_id == user.id,
+                    EmailVerification.verified_at.is_(None)
+                )
+            )
+            old_verifications = old_verifications_result.scalars().all()
+            for old_verification in old_verifications:
+                await db.delete(old_verification)
+            await db.flush()
     else:
         # Check if user exists by email
         user_query = select(User).where(User.email == google_user_info.email)
@@ -266,6 +284,14 @@ async def google_callback(
         user = result.scalar_one_or_none()
         
         if user:
+            # SECURITY: Only allow account linking if Google's email is verified
+            # This prevents linking to accounts where the email ownership is uncertain
+            if not google_user_info.verified_email:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot link account: Google email is not verified. Please verify your email with Google first."
+                )
+            
             # Link OAuth account to existing user
             oauth_account = OAuthAccount(
                 user_id=user.id,
@@ -279,8 +305,25 @@ async def google_callback(
             # Update user info
             if google_user_info.picture:
                 user.avatar_url = google_user_info.picture
-            if google_user_info.verified_email:
+            
+            # Google email is verified, so we can safely verify the user's email
+            # This handles the case where user registered with email/password but didn't verify
+            if not user.email_verified:
                 user.email_verified = True
+                print(f"Email verified via Google OAuth for user: {user.email}")
+            
+            # Clean up old unverified email verification tokens
+            # These are no longer needed since email is verified via OAuth
+            old_verifications_result = await db.execute(
+                select(EmailVerification).where(
+                    EmailVerification.user_id == user.id,
+                    EmailVerification.verified_at.is_(None)
+                )
+            )
+            old_verifications = old_verifications_result.scalars().all()
+            for old_verification in old_verifications:
+                await db.delete(old_verification)
+            await db.flush()
         else:
             # Create new user
             # Generate username from email if name not available
