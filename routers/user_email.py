@@ -2,7 +2,7 @@
 import os
 import secrets
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
@@ -13,9 +13,9 @@ from sqlalchemy.orm import selectinload
 from jose import JWTError, jwt
 import bcrypt
 from database import get_db
-from models import User, EmailVerification
-from schemas.user import UserRegister, UserResponse, UserLogin, ResendVerificationRequest
-from services.email import send_verification_email
+from models import User, EmailVerification, PasswordReset
+from schemas.user import UserRegister, UserResponse, UserLogin, ResendVerificationRequest, ForgotPasswordRequest, ResetPasswordRequest
+from services.email import send_verification_email, send_password_reset_email
 from services.cloudinary import upload_image, delete_image
 
 # Load environment variables
@@ -28,7 +28,8 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
-EMAIL_VERIFICATION_EXPIRATION_HOURS = 24
+EMAIL_VERIFICATION_EXPIRATION_HOURS = 1
+PASSWORD_RESET_EXPIRATION_HOURS = 1
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -59,9 +60,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         )
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
+        expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return encoded_jwt
@@ -139,7 +140,7 @@ async def register(
     
     # Generate verification token
     verification_token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
     
     # Create email verification record
     email_verification = EmailVerification(
@@ -199,7 +200,7 @@ async def verify_email(
         raise HTTPException(status_code=400, detail="Email already verified")
     
     # Check if expired
-    if datetime.utcnow() > email_verification.expires_at:
+    if datetime.now(timezone.utc) > email_verification.expires_at:
         print(f"Token expired: {token[:20]}... (expired at {email_verification.expires_at})")
         raise HTTPException(status_code=400, detail="Verification token has expired")
     
@@ -212,9 +213,11 @@ async def verify_email(
     
     # Mark email as verified
     user.email_verified = True
-    email_verification.verified_at = datetime.utcnow()
+    email_verification.verified_at = datetime.now(timezone.utc)
     
     await db.commit()
+    # Refresh user to ensure all attributes (including updated_at) are loaded
+    await db.refresh(user)
     print(f"Email verified successfully for user: {user.email}")
     
     # Create JWT token to automatically log the user in
@@ -231,9 +234,10 @@ async def verify_email(
     
     # Create JSON response with user data and set JWT token in HttpOnly cookie
     # Frontend will handle the redirect
+    user_response = UserResponse.model_validate(user)
     response_content = {
         "message": "Email verified successfully",
-        "user": UserResponse.model_validate(user).model_dump(),
+        "user": user_response.model_dump(mode='json'),
         "auto_login": True  # Signal to frontend to redirect to home
     }
     
@@ -274,8 +278,9 @@ async def resend_verification(
         # Don't reveal if email exists or not (security)
         return {"message": "If the email exists, a verification email has been sent"}
     
+    # If email is already verified, act normal and don't send email
     if user.email_verified:
-        raise HTTPException(status_code=400, detail="Email already verified")
+        return {"message": "If the email exists, a verification email has been sent"}
     
     # Invalidate old verification tokens (delete unverified ones)
     old_verifications_result = await db.execute(
@@ -291,7 +296,7 @@ async def resend_verification(
     
     # Generate new verification token
     verification_token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
     
     # Create new email verification record
     email_verification = EmailVerification(
@@ -358,7 +363,7 @@ async def login(
         
         # Generate new verification token
         verification_token = secrets.token_urlsafe(32)
-        expires_at = datetime.utcnow() + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=EMAIL_VERIFICATION_EXPIRATION_HOURS)
         
         # Create new email verification record
         email_verification = EmailVerification(
@@ -395,9 +400,10 @@ async def login(
     is_secure = ENVIRONMENT == "production"
     
     # Create response with token in HttpOnly cookie
+    user_response = UserResponse.model_validate(user)
     response_content = {
         "message": "Login successful",
-        "user": UserResponse.model_validate(user).model_dump()
+        "user": user_response.model_dump(mode='json')
     }
     
     # Add warning if email is not verified
@@ -508,4 +514,112 @@ async def upload_user_icon(
     except Exception as e:
         # Other upload errors
         raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Request password reset - sends reset link to email"""
+    # Find user by email
+    result = await db.execute(select(User).where(User.email == request.email))
+    user = result.scalar_one_or_none()
+    
+    # Don't reveal if email exists (security)
+    # Always return success message
+    if not user:
+        return {"message": "If the email exists, a password reset link has been sent"}
+    
+    # Only allow password reset for email-based users (not OAuth-only)
+    if not user.password_hash:
+        # User doesn't have a password (OAuth-only account)
+        return {"message": "If the email exists, a password reset link has been sent"}
+    
+    # Invalidate old unused password reset tokens
+    old_resets_result = await db.execute(
+        select(PasswordReset).where(
+            PasswordReset.user_id == user.id,
+            PasswordReset.used_at.is_(None)
+        )
+    )
+    old_resets = old_resets_result.scalars().all()
+    for old_reset in old_resets:
+        await db.delete(old_reset)
+    await db.flush()
+    
+    # Generate new reset token
+    reset_token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=PASSWORD_RESET_EXPIRATION_HOURS)
+    
+    # Create password reset record
+    password_reset = PasswordReset(
+        user_id=user.id,
+        token=reset_token,
+        expires_at=expires_at
+    )
+    db.add(password_reset)
+    await db.commit()
+    
+    # Send password reset email
+    try:
+        await send_password_reset_email(
+            email=user.email,
+            username=user.username,
+            reset_token=reset_token,
+            frontend_url=FRONTEND_URL
+        )
+        print(f"Password reset email sent to {user.email}")
+    except Exception as e:
+        print(f"Failed to send password reset email: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Failed to send password reset email")
+    
+    return {"message": "If the email exists, a password reset link has been sent"}
+
+
+@router.post("/reset-password")
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Reset password with token"""
+    # Find password reset record with user relationship loaded
+    result = await db.execute(
+        select(PasswordReset)
+        .options(selectinload(PasswordReset.user))
+        .where(PasswordReset.token == request.token)
+    )
+    password_reset = result.scalar_one_or_none()
+    
+    if not password_reset:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    
+    # Check if already used
+    if password_reset.used_at:
+        raise HTTPException(status_code=400, detail="Reset token has already been used")
+    
+    # Check if expired
+    if datetime.now(timezone.utc) > password_reset.expires_at:
+        raise HTTPException(status_code=400, detail="Reset token has expired")
+    
+    # Get user (should be loaded via selectinload)
+    user = password_reset.user
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Only allow password reset for email-based users
+    if not user.password_hash:
+        raise HTTPException(status_code=400, detail="This account does not use password authentication")
+    
+    # Update password
+    user.password_hash = get_password_hash(request.new_password)
+    password_reset.used_at = datetime.now(timezone.utc)
+    
+    await db.commit()
+    print(f"Password reset successfully for user: {user.email}")
+    
+    return {"message": "Password reset successfully"}
 
