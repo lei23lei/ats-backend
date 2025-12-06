@@ -383,24 +383,27 @@ async def google_callback(
     response = RedirectResponse(url=f"{FRONTEND_URL}/auth/callback")
     
     # Set JWT in secure HttpOnly cookie
-    # Note: path defaults to "/" if not specified, but we'll be explicit
+    # For cross-origin requests, use samesite="none" with secure=True
+    samesite_value = "none" if is_secure else "lax"
+    
     response.set_cookie(
         key="access_token",
         value=jwt_token,
         path="/",  # Explicitly set path to match deletion
         httponly=True,
-        secure=is_secure,  # True in production with HTTPS
-        samesite="lax",
+        secure=is_secure,  # True in production with HTTPS (required for samesite="none")
+        samesite=samesite_value,  # "none" for cross-origin, "lax" for same-origin
         max_age=JWT_EXPIRATION_HOURS * 3600
     )
     
     # Clear OAuth state cookie (must match secure setting)
+    samesite_value = "none" if is_secure else "lax"
     response.delete_cookie(
         key="oauth_state",
         path="/",
         httponly=True,
         secure=is_secure,  # Must match the setting when cookie was set
-        samesite="lax"
+        samesite=samesite_value  # Must match the setting when cookie was set
     )
     
     return response
@@ -457,12 +460,13 @@ async def logout(request: Request):
     response = JSONResponse(content={"message": "Logged out successfully"})
     
     # Method 1: Use delete_cookie with matching settings
+    samesite_value = "none" if is_secure else "lax"
     response.delete_cookie(
         key="access_token",
         path="/",  # Must match the path when cookie was set
         httponly=True,
         secure=is_secure,  # Must match the setting when cookie was set
-        samesite="lax"  # Must match the setting when cookie was set
+        samesite=samesite_value  # Must match the setting when cookie was set
     )
     
     # Method 2: Also set cookie to empty with max_age=0 as backup
@@ -473,7 +477,7 @@ async def logout(request: Request):
         path="/",
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=samesite_value,  # Must match the setting when cookie was set
         max_age=0  # Expire immediately
     )
     

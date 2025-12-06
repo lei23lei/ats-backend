@@ -41,10 +41,12 @@ app = FastAPI(title="ATS Backend", version="0.1.0", lifespan=lifespan)
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 # Configure CORS
+# For production, make sure FRONTEND_URL is set correctly (e.g., https://your-frontend.onrender.com)
+# CORS origins must match exactly (including protocol and port)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],  # Allow requests from frontend
-    allow_credentials=True,
+    allow_origins=[FRONTEND_URL],  # Allow requests from frontend (must match exactly)
+    allow_credentials=True,  # Required for cookies to work cross-origin
     allow_methods=["*"],  # Allow all HTTP methods
     allow_headers=["*"],  # Allow all headers
 )

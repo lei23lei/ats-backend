@@ -250,13 +250,16 @@ async def verify_email(
     parsed_url = urlparse(FRONTEND_URL)
     cookie_domain = parsed_url.hostname
     
+    # For cross-origin requests, use samesite="none" with secure=True
+    samesite_value = "none" if is_secure else "lax"
+    
     response.set_cookie(
         key="access_token",
         value=jwt_token,
         path="/",
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=samesite_value,  # "none" for cross-origin, "lax" for same-origin
         max_age=JWT_EXPIRATION_HOURS * 3600,
         domain=cookie_domain if cookie_domain and cookie_domain != "localhost" else None
     )
@@ -415,14 +418,24 @@ async def login(
     
     response = JSONResponse(content=response_content)
     
+    # Set HttpOnly cookie with JWT token
+    # For cross-origin requests (different domains), cookies work when:
+    # 1. CORS allows credentials (allow_credentials=True)
+    # 2. Frontend uses credentials: "include" in fetch
+    # 3. SameSite must be "none" for cross-origin POST requests (requires secure=True)
+    # 4. Don't set domain - browser will send cookie to backend domain automatically
+    # Note: "lax" only works for same-site or top-level navigation, not for cross-origin POST
+    samesite_value = "none" if is_secure else "lax"  # "none" requires secure=True (HTTPS)
+    
     response.set_cookie(
         key="access_token",
         value=jwt_token,
         path="/",
         httponly=True,
-        secure=is_secure,
-        samesite="lax",
+        secure=is_secure,  # True in production (HTTPS required for samesite="none")
+        samesite=samesite_value,  # "none" for cross-origin, "lax" for same-origin
         max_age=JWT_EXPIRATION_HOURS * 3600
+        # Don't set domain - let browser handle it (cookie will be sent to backend domain)
     )
     
     return response
