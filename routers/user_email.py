@@ -175,6 +175,7 @@ async def register(
 
 @router.get("/verify-email")
 async def verify_email(
+    request: Request,
     token: str,
     db: AsyncSession = Depends(get_db)
 ):
@@ -228,9 +229,25 @@ async def verify_email(
     }
     jwt_token = create_access_token(token_data)
     
-    # Determine secure setting based on environment
+    # Determine secure setting based on request protocol (HTTPS detection)
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
-    is_secure = ENVIRONMENT == "production"
+    
+    # Check if request is over HTTPS
+    # 1. Check X-Forwarded-Proto header (set by proxies like Render)
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").lower()
+    # 2. Check request URL scheme
+    url_scheme = request.url.scheme
+    # 3. Check if FRONTEND_URL is HTTPS (indicates production)
+    frontend_is_https = FRONTEND_URL.startswith("https://")
+    
+    # Determine if we should use secure cookies
+    is_https = (
+        forwarded_proto == "https" or 
+        url_scheme == "https" or 
+        frontend_is_https or 
+        ENVIRONMENT == "production"
+    )
+    is_secure = is_https  # Use HTTPS detection
     
     # Create JSON response with user data and set JWT token in HttpOnly cookie
     # Frontend will handle the redirect
@@ -244,12 +261,7 @@ async def verify_email(
     response = JSONResponse(content=response_content, status_code=200)
     
     # Set HttpOnly cookie with JWT token
-    # Extract domain from FRONTEND_URL (e.g., "localhost" from "http://localhost:3000")
-    # This allows the cookie to be accessible across ports on the same domain
-    from urllib.parse import urlparse
-    parsed_url = urlparse(FRONTEND_URL)
-    cookie_domain = parsed_url.hostname
-    
+    # For cross-origin requests, don't set domain - let browser handle it
     # For cross-origin requests, use samesite="none" with secure=True
     samesite_value = "none" if is_secure else "lax"
     
@@ -260,8 +272,8 @@ async def verify_email(
         httponly=True,
         secure=is_secure,
         samesite=samesite_value,  # "none" for cross-origin, "lax" for same-origin
-        max_age=JWT_EXPIRATION_HOURS * 3600,
-        domain=cookie_domain if cookie_domain and cookie_domain != "localhost" else None
+        max_age=JWT_EXPIRATION_HOURS * 3600
+        # Don't set domain - let browser handle it (cookie will be sent to backend domain)
     )
     
     return response
@@ -333,6 +345,7 @@ async def resend_verification(
 
 @router.post("/login", response_model=dict)
 async def login(
+    request: Request,
     login_data: UserLogin,
     db: AsyncSession = Depends(get_db)
 ):
@@ -401,9 +414,26 @@ async def login(
     }
     jwt_token = create_access_token(token_data)
     
-    # Determine secure setting based on environment
+    # Determine secure setting based on request protocol (HTTPS detection)
+    # Check X-Forwarded-Proto header (set by proxies like Render) or request URL scheme
     ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
-    is_secure = ENVIRONMENT == "production"
+    
+    # Check if request is over HTTPS
+    # 1. Check X-Forwarded-Proto header (set by proxies like Render)
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").lower()
+    # 2. Check request URL scheme
+    url_scheme = request.url.scheme
+    # 3. Check if FRONTEND_URL is HTTPS (indicates production)
+    frontend_is_https = FRONTEND_URL.startswith("https://")
+    
+    # Determine if we should use secure cookies
+    is_https = (
+        forwarded_proto == "https" or 
+        url_scheme == "https" or 
+        frontend_is_https or 
+        ENVIRONMENT == "production"
+    )
+    is_secure = is_https  # Use HTTPS detection
     
     # Create response with token in HttpOnly cookie
     user_response = UserResponse.model_validate(user)
@@ -432,7 +462,7 @@ async def login(
         value=jwt_token,
         path="/",
         httponly=True,
-        secure=is_secure,  # True in production (HTTPS required for samesite="none")
+        secure=is_secure,  # True when HTTPS (required for samesite="none")
         samesite=samesite_value,  # "none" for cross-origin, "lax" for same-origin
         max_age=JWT_EXPIRATION_HOURS * 3600
         # Don't set domain - let browser handle it (cookie will be sent to backend domain)

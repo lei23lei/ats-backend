@@ -376,8 +376,23 @@ async def google_callback(
     }
     jwt_token = create_access_token(token_data)
     
-    # Determine secure setting based on environment
-    is_secure = ENVIRONMENT == "production"
+    # Determine secure setting based on request protocol (HTTPS detection)
+    # Check if request is over HTTPS
+    # 1. Check X-Forwarded-Proto header (set by proxies like Render)
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").lower()
+    # 2. Check request URL scheme
+    url_scheme = request.url.scheme
+    # 3. Check if FRONTEND_URL is HTTPS (indicates production)
+    frontend_is_https = FRONTEND_URL.startswith("https://")
+    
+    # Determine if we should use secure cookies
+    is_https = (
+        forwarded_proto == "https" or 
+        url_scheme == "https" or 
+        frontend_is_https or 
+        ENVIRONMENT == "production"
+    )
+    is_secure = is_https  # Use HTTPS detection
     
     # Redirect to frontend (NO token in URL - security risk)
     response = RedirectResponse(url=f"{FRONTEND_URL}/auth/callback")
@@ -391,13 +406,12 @@ async def google_callback(
         value=jwt_token,
         path="/",  # Explicitly set path to match deletion
         httponly=True,
-        secure=is_secure,  # True in production with HTTPS (required for samesite="none")
+        secure=is_secure,  # True when HTTPS (required for samesite="none")
         samesite=samesite_value,  # "none" for cross-origin, "lax" for same-origin
         max_age=JWT_EXPIRATION_HOURS * 3600
     )
     
     # Clear OAuth state cookie (must match secure setting)
-    samesite_value = "none" if is_secure else "lax"
     response.delete_cookie(
         key="oauth_state",
         path="/",
