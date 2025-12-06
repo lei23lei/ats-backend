@@ -49,6 +49,7 @@ app.add_middleware(
     allow_credentials=True,  # Required for cookies to work cross-origin
     allow_methods=["*"],  # Allow all HTTP methods
     allow_headers=["*"],  # Allow all headers
+    expose_headers=["X-Auth-Token-Available"],  # Expose custom headers for Safari compatibility
 )
 
 

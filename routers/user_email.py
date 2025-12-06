@@ -454,6 +454,10 @@ async def login(
     
     response = JSONResponse(content=response_content)
     
+    # Add header to indicate token is available in response body (for Safari compatibility)
+    # Safari blocks SameSite=None cookies, so frontend should use token from response body
+    response.headers["X-Auth-Token-Available"] = "true"
+    
     # Set HttpOnly cookie with JWT token
     # For cross-origin requests (different domains), cookies work when:
     # 1. CORS allows credentials (allow_credentials=True)
@@ -461,6 +465,7 @@ async def login(
     # 3. SameSite must be "none" for cross-origin POST requests (requires secure=True)
     # 4. Don't set domain - browser will send cookie to backend domain automatically
     # Note: "lax" only works for same-site or top-level navigation, not for cross-origin POST
+    # Note: Safari blocks SameSite=None cookies, so frontend must use token from response body
     samesite_value = "none" if is_secure else "lax"  # "none" requires secure=True (HTTPS)
     
     response.set_cookie(
