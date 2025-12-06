@@ -30,12 +30,25 @@ else:
 # Convert to async PostgreSQL URL
 ASYNC_DATABASE_URL = URL_DATABASE.replace("postgresql://", "postgresql+asyncpg://")
 
-# Create async engine
-# Set echo=False in production (controlled by environment variable)
+# Create async engine with connection pool settings for production
+# These settings help prevent "connection is closed" errors on Render
 engine = create_async_engine(
     ASYNC_DATABASE_URL,
     echo=os.getenv("DEBUG", "false").lower() == "true",  # Only echo SQL in debug mode
     future=True,
+    # Connection pool settings for production stability
+    pool_size=5,  # Number of connections to maintain in the pool
+    max_overflow=10,  # Additional connections beyond pool_size
+    pool_pre_ping=True,  # Test connections before using them (prevents "connection is closed" errors)
+    pool_recycle=3600,  # Recycle connections after 1 hour (prevents stale connections)
+    pool_timeout=30,  # Timeout when getting connection from pool
+    # Connection arguments for asyncpg
+    connect_args={
+        "server_settings": {
+            "application_name": "ats-backend",
+        },
+        "command_timeout": 60,  # Timeout for individual commands
+    }
 )
 
 # Create async session factory
