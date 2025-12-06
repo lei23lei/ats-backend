@@ -1,66 +1,40 @@
-"""Email service for sending verification emails"""
+"""Email service for sending verification emails using Resend"""
 import os
-from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
+import asyncio
+import resend
+from resend.exceptions import ResendError
 from dotenv import load_dotenv
-from typing import Optional
 
 load_dotenv()
 
-# Email configuration - lazy initialization to avoid errors if env vars not set
-_conf: Optional[ConnectionConfig] = None
-_fastmail: Optional[FastMail] = None
+# Resend configuration
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+
+# Initialize Resend API key (lazy initialization)
+_resend_initialized = False
 
 
-def get_email_config() -> ConnectionConfig:
-    """Get email configuration, creating it if needed"""
-    global _conf
-    if _conf is None:
-        MAIL_USERNAME = os.getenv("MAIL_USERNAME")
-        MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")
-        MAIL_FROM = os.getenv("MAIL_FROM")
-        MAIL_PORT = int(os.getenv("MAIL_PORT", "465"))  # Default to 465 (SSL) instead of 587 (STARTTLS)
-        MAIL_SERVER = os.getenv("MAIL_SERVER", "smtp.gmail.com")
-        MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "ATS Backend")
-        
-        if not MAIL_USERNAME or not MAIL_PASSWORD or not MAIL_FROM:
+def _ensure_resend_initialized():
+    """Ensure Resend API key is set"""
+    global _resend_initialized
+    if not _resend_initialized:
+        if not RESEND_API_KEY:
             raise ValueError(
-                "Email configuration missing. Please set MAIL_USERNAME, MAIL_PASSWORD, and MAIL_FROM in .env"
+                "RESEND_API_KEY not configured. Please set RESEND_API_KEY in .env"
             )
-        
-        # Determine if we should validate certificates (disable in development if needed)
-        ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
-        validate_certs = ENVIRONMENT == "production"
-        
-        # Use SSL/TLS (port 465) instead of STARTTLS (port 587) for better cloud compatibility
-        # Port 465 uses SSL from the start, which is more reliable on cloud platforms like Render
-        use_ssl = MAIL_PORT == 465
-        use_starttls = MAIL_PORT == 587
-        
-        _conf = ConnectionConfig(
-            MAIL_USERNAME=MAIL_USERNAME,
-            MAIL_PASSWORD=MAIL_PASSWORD,
-            MAIL_FROM=MAIL_FROM,
-            MAIL_PORT=MAIL_PORT,
-            MAIL_SERVER=MAIL_SERVER,
-            MAIL_FROM_NAME=MAIL_FROM_NAME,
-            MAIL_STARTTLS=use_starttls,
-            MAIL_SSL_TLS=use_ssl,
-            USE_CREDENTIALS=True,
-            VALIDATE_CERTS=validate_certs
-        )
-    return _conf
-
-
-def get_fastmail() -> FastMail:
-    """Get FastMail instance, creating it if needed"""
-    global _fastmail
-    if _fastmail is None:
-        _fastmail = FastMail(get_email_config())
-    return _fastmail
+        if not EMAIL_FROM:
+            raise ValueError(
+                "EMAIL_FROM not configured. Please set EMAIL_FROM in .env (e.g., 'onboarding@resend.dev' or 'noreply@yourdomain.com')"
+            )
+        resend.api_key = RESEND_API_KEY
+        _resend_initialized = True
 
 
 async def send_verification_email(email: str, username: str, verification_token: str, frontend_url: str):
-    """Send email verification email"""
+    """Send email verification email using Resend"""
+    _ensure_resend_initialized()
+    
     verification_url = f"{frontend_url}/email-verify?token={verification_token}"
     
     html_content = f"""
@@ -77,19 +51,28 @@ async def send_verification_email(email: str, username: str, verification_token:
     </html>
     """
     
-    message = MessageSchema(
-        subject="Verify Your Email Address",
-        recipients=[email],
-        body=html_content,
-        subtype="html"
-    )
+    params = {
+        "from": EMAIL_FROM,
+        "to": [email],
+        "subject": "Verify Your Email Address",
+        "html": html_content,
+    }
     
-    fastmail = get_fastmail()
-    await fastmail.send_message(message)
+    # Resend API is synchronous, so we run it in a thread pool to avoid blocking
+    try:
+        await asyncio.to_thread(resend.Emails.send, params)
+    except ResendError as e:
+        # Re-raise Resend errors with original message for better error handling
+        raise Exception(f"Failed to send verification email via Resend: {str(e)}")
+    except Exception as e:
+        # Catch any other unexpected errors
+        raise Exception(f"Failed to send verification email via Resend: {str(e)}")
 
 
 async def send_password_reset_email(email: str, username: str, reset_token: str, frontend_url: str):
-    """Send password reset email"""
+    """Send password reset email using Resend"""
+    _ensure_resend_initialized()
+    
     reset_url = f"{frontend_url}/reset-pwd?token={reset_token}"
     
     html_content = f"""
@@ -107,13 +90,19 @@ async def send_password_reset_email(email: str, username: str, reset_token: str,
     </html>
     """
     
-    message = MessageSchema(
-        subject="Reset Your Password",
-        recipients=[email],
-        body=html_content,
-        subtype="html"
-    )
+    params = {
+        "from": EMAIL_FROM,
+        "to": [email],
+        "subject": "Reset Your Password",
+        "html": html_content,
+    }
     
-    fastmail = get_fastmail()
-    await fastmail.send_message(message)
-
+    # Resend API is synchronous, so we run it in a thread pool to avoid blocking
+    try:
+        await asyncio.to_thread(resend.Emails.send, params)
+    except ResendError as e:
+        # Re-raise Resend errors with original message for better error handling
+        raise Exception(f"Failed to send password reset email via Resend: {str(e)}")
+    except Exception as e:
+        # Catch any other unexpected errors
+        raise Exception(f"Failed to send password reset email via Resend: {str(e)}")

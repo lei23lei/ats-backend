@@ -15,7 +15,8 @@ dependencies = [
     "pydantic[email]>=2.0.0",
     "bcrypt>=4.0.0",
     "uvicorn[standard]>=0.24.0",
-    "fastapi-mail>=1.5.8",
     "cloudinary>=1.41.0",
     "python-multipart>=0.0.6",
+    "resend>=2.19.0",
+    "pydantic-settings>=2.12.0",
 ]

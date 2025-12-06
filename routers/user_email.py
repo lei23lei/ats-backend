@@ -317,10 +317,13 @@ async def resend_verification(
         )
         print(f"Verification email resent to {user.email}")
     except Exception as e:
-        print(f"Failed to send verification email: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Failed to send verification email")
+        # Log error but don't fail the request - token is already created
+        # User can request another email if needed
+        error_msg = str(e)
+        print(f"Failed to send verification email to {user.email}: {error_msg}")
+        # Still return success - the token was created, user can try again if email wasn't sent
+        # This prevents revealing email sending issues to potential attackers
+        return {"message": "If the email exists, a verification email has been sent"}
     
     return {"message": "Verification email sent"}
 
@@ -571,10 +574,13 @@ async def forgot_password(
         )
         print(f"Password reset email sent to {user.email}")
     except Exception as e:
-        print(f"Failed to send password reset email: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Failed to send password reset email")
+        # Log error but don't fail the request - token is already created
+        # User can request another email if needed
+        error_msg = str(e)
+        print(f"Failed to send password reset email to {user.email}: {error_msg}")
+        # Still return success - the token was created, user can try again if email wasn't sent
+        # This prevents revealing email sending issues to potential attackers
+        return {"message": "If the email exists, a password reset link has been sent"}
     
     return {"message": "If the email exists, a password reset link has been sent"}
 
