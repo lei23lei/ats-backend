@@ -255,7 +255,10 @@ async def verify_email(
     response_content = {
         "message": "Email verified successfully",
         "user": user_response.model_dump(mode='json'),
-        "auto_login": True  # Signal to frontend to redirect to home
+        "auto_login": True,  # Signal to frontend to redirect to home
+        # Return token in response body as fallback for Safari (Safari blocks SameSite=None cookies)
+        # Frontend should prefer cookies, but can use this token for Safari via Authorization header
+        "token": jwt_token
     }
     
     response = JSONResponse(content=response_content, status_code=200)
@@ -439,7 +442,10 @@ async def login(
     user_response = UserResponse.model_validate(user)
     response_content = {
         "message": "Login successful",
-        "user": user_response.model_dump(mode='json')
+        "user": user_response.model_dump(mode='json'),
+        # Return token in response body as fallback for Safari (Safari blocks SameSite=None cookies)
+        # Frontend should prefer cookies, but can use this token for Safari via Authorization header
+        "token": jwt_token
     }
     
     # Add warning if email is not verified
